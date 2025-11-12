@@ -187,6 +187,42 @@ function App() {
       return
     }
 
+    // If the user said "draw ..." and it isn't a simple Option A command, use the drawing agent directly
+    if (/^draw\b/i.test(content)) {
+      fetch('/api/draw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ instruction: content.replace(/^draw\s*/i, ''), style: 'chalk' })
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const t = await res.text().catch(() => '')
+            throw new Error(t || `HTTP ${res.status}`)
+          }
+          return res.json() as Promise<{ strokes: Stroke[] }>
+        })
+        .then(({ strokes }) => {
+          setBoardActions(prev => [...prev, { type: 'freehand_strokes', strokes }])
+          const assistantMessage: Message = {
+            id: (Date.now() + 1).toString(),
+            role: 'assistant',
+            content: 'Drawing on the board.',
+            timestamp: new Date()
+          }
+          setMessages(prev => [...prev, assistantMessage])
+        })
+        .catch((err) => {
+          const assistantMessage: Message = {
+            id: (Date.now() + 2).toString(),
+            role: 'assistant',
+            content: `Sorry, I couldn't draw that. (${err.message})`,
+            timestamp: new Date()
+          }
+          setMessages(prev => [...prev, assistantMessage])
+        })
+      return
+    }
+
     // Call backend APIs in parallel: chat reply and board plan
     const chatPromise = fetch('/api/chat', {
       method: 'POST',

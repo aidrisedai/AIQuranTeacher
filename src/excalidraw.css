@@ -1,0 +1,3 @@
+/* Minimal stub to keep Excalidraw usable under Vite when CSS export is gated */
+.excalidraw { height: 100%; }
+.excalidraw .layer-ui__wrapper__github-badge { display: none; }

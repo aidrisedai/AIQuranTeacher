@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import ChatInterface from './components/ChatInterface'
-import Blackboard from './components/Blackboard'
+import BlackboardExcalidraw from './components/BlackboardExcalidraw'
 import './App.css'
 
 export interface Message {
@@ -8,6 +8,73 @@ export interface Message {
   role: 'user' | 'assistant'
   content: string
   timestamp: Date
+}
+
+export type Stroke = { points: { x: number; y: number }[]; color?: string; width?: number }
+
+export type BoardAction =
+  | { type: 'write_text'; text: string; rtl?: boolean; size?: number; color?: string; x?: number; y?: number }
+  | { type: 'draw_shape'; shape: 'circle' | 'rect' | 'line' | 'arrow'; points?: { x: number; y: number }[]; color?: string; width?: number }
+  | { type: 'annotate_text'; note: string; color?: string }
+  | { type: 'freehand_request'; instruction: string; color?: string; width?: number; style?: 'chalk' | 'marker' }
+  | { type: 'freehand_strokes'; strokes: Stroke[] }
+
+// Simple local fallback parser for common commands if the planner returns nothing
+function parseLocalActions(message: string): BoardAction[] {
+  const m = message.trim()
+  const lower = m.toLowerCase()
+
+  const pickColor = (): string | undefined => {
+    if (lower.includes(' red')) return '#ef4444'
+    if (lower.includes(' yellow')) return '#fde047'
+    if (lower.includes(' green')) return '#22c55e'
+    if (lower.includes(' blue')) return '#60a5fa'
+    if (lower.includes(' white')) return '#fafafa'
+    return undefined
+  }
+  const color = pickColor()
+
+  const size = lower.includes('large') ? 28 : lower.includes('small') ? 18 : lower.includes('medium') ? 22 : undefined
+
+  // Detect quoted text
+  const quoted = m.match(/["“](.+?)["”]/)
+  const arabicRegex = /[\u0600-\u06FF]/
+
+  // Write cases
+  if (lower.startsWith('write') || lower.startsWith('please write') || lower.includes('write:')) {
+    let text = quoted?.[1] ?? m.replace(/^[Ww]rite:?\s*/, '')
+    if (!text) text = m
+    const rtl = arabicRegex.test(text)
+    return [{ type: 'write_text', text, rtl, size, color }]
+  }
+
+  // Draw shapes
+  if (lower.includes('draw a circle') || lower.includes('draw circle')) {
+    return [{ type: 'draw_shape', shape: 'circle', color, width: 4 }]
+  }
+  if (lower.includes('draw an arrow') || lower.includes('draw arrow')) {
+    return [{ type: 'draw_shape', shape: 'arrow', color, width: 4 }]
+  }
+  if (lower.includes('draw a rectangle') || lower.includes('draw rectangle') || lower.includes('draw a box') || lower.includes('draw box')) {
+    return [{ type: 'draw_shape', shape: 'rect', color, width: 4 }]
+  }
+  if (lower.includes('draw a line') || lower.includes('draw line')) {
+    return [{ type: 'draw_shape', shape: 'line', color, width: 4 }]
+  }
+
+  // General draw request → freehand_request
+  if (lower.startsWith('draw')) {
+    const instruction = m.replace(/^[Dd]raw\s*/, '') || m
+    return [{ type: 'freehand_request', instruction, color, width: 4, style: 'chalk' }]
+  }
+
+  // Fallback: if there is quoted content, write it
+  if (quoted?.[1]) {
+    const text = quoted[1]
+    const rtl = arabicRegex.test(text)
+    return [{ type: 'write_text', text, rtl, size, color }]
+  }
+  return []
 }
 
 function App() {
@@ -19,7 +86,8 @@ function App() {
       timestamp: new Date()
     }
   ])
-  const [blackboardContent, setBlackboardContent] = useState<string>('')
+  const [boardActions, setBoardActions] = useState<BoardAction[]>([])
+  const [followCommands] = useState<boolean>(true)
 
   const handleSendMessage = (content: string) => {
     const userMessage: Message = {
@@ -31,28 +99,94 @@ function App() {
 
     setMessages(prev => [...prev, userMessage])
 
-    // Simulate AI response (in a real app, this would call an API)
-    setTimeout(() => {
-      const aiResponse = generateAIResponse(content)
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'assistant',
-        content: aiResponse,
-        timestamp: new Date()
+    // Call backend APIs in parallel: chat reply and board plan
+    const chatPromise = fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: content })
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const t = await res.text().catch(() => '')
+          throw new Error(t || `HTTP ${res.status}`)
+        }
+        return res.json() as Promise<{ reply: string }>
+      })
+
+    const planPromise = fetch('/api/plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: content })
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const t = await res.text().catch(() => '')
+          throw new Error(t || `HTTP ${res.status}`)
+        }
+        return res.json() as Promise<{ actions: BoardAction[] }>
+      })
+
+    Promise.allSettled([chatPromise, planPromise]).then(async (results) => {
+      const [chatRes, planRes] = results as [PromiseSettledResult<{ reply: string }>, PromiseSettledResult<{ actions: BoardAction[] }>]
+
+      if (chatRes.status === 'fulfilled') {
+        const assistantMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: chatRes.value.reply,
+          timestamp: new Date()
+        }
+        setMessages(prev => [...prev, assistantMessage])
+      } else {
+        const assistantMessage: Message = {
+          id: (Date.now() + 2).toString(),
+          role: 'assistant',
+          content: `Sorry, I couldn't get a response right now. (${chatRes.reason?.message || chatRes.reason})`,
+          timestamp: new Date()
+        }
+        setMessages(prev => [...prev, assistantMessage])
       }
 
-      setMessages(prev => [...prev, assistantMessage])
+      let planned: BoardAction[] = []
+      if (planRes.status === 'fulfilled') planned = planRes.value.actions || []
 
-      // Update blackboard with the AI's response
-      setBlackboardContent(prev => {
-        const newContent = prev ? prev + '\n\n' + aiResponse : aiResponse
-        return newContent
-      })
-    }, 1000)
+      if (followCommands) {
+        // If planner returned nothing, try local fallback parser
+        if (!planned || planned.length === 0) {
+          planned = parseLocalActions(content)
+        }
+        if (planned && planned.length > 0) {
+          // Resolve any freehand_request actions via /api/draw
+          const freehandReqs = planned.filter(a => a.type === 'freehand_request') as Extract<BoardAction, { type: 'freehand_request' }>[]
+          const others = planned.filter(a => a.type !== 'freehand_request')
+
+          const strokeResults = await Promise.allSettled(
+            freehandReqs.map(req =>
+              fetch('/api/draw', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ instruction: req.instruction, color: req.color, width: req.width, style: req.style || 'chalk' })
+              }).then(async (res) => {
+                if (!res.ok) {
+                  const t = await res.text().catch(() => '')
+                  throw new Error(t || `HTTP ${res.status}`)
+                }
+                return res.json() as Promise<{ strokes: import('./App').Stroke[] }>
+              })
+            )
+          )
+
+          const strokeActions: BoardAction[] = strokeResults.flatMap(r => r.status === 'fulfilled' ? [{ type: 'freehand_strokes', strokes: r.value.strokes }] as BoardAction[] : [])
+
+          const finalActions = [...others, ...strokeActions]
+          if (finalActions.length) setBoardActions(prev => [...prev, ...finalActions])
+        }
+      }
+    })
   }
 
   const handleClearBlackboard = () => {
-    setBlackboardContent('')
+    setBoardActions([])
   }
 
   return (
@@ -63,7 +197,7 @@ function App() {
 
       <div className="classroom-content">
         <div className="blackboard-section">
-          <Blackboard content={blackboardContent} onClear={handleClearBlackboard} />
+          <BlackboardExcalidraw onClear={handleClearBlackboard} actions={boardActions} />
         </div>
 
         <div className="chat-section">
@@ -74,35 +208,6 @@ function App() {
   )
 }
 
-// Simple AI response generator (placeholder for actual AI integration)
-function generateAIResponse(userInput: string): string {
-  const input = userInput.toLowerCase()
-
-  if (input.includes('surah') || input.includes('chapter')) {
-    return `📖 The Quran consists of 114 Surahs (chapters).\n\nEach Surah has a unique name and contains Ayahs (verses). The longest Surah is Al-Baqarah (The Cow) with 286 verses, and the shortest are Al-Kawthar, Al-Asr, and Al-Nasr with just 3-4 verses each.`
-  }
-
-  if (input.includes('pillar') || input.includes('pillars')) {
-    return `🕋 The Five Pillars of Islam:\n\n1. Shahada - Declaration of Faith\n2. Salah - Prayer (5 times daily)\n3. Zakat - Charitable giving\n4. Sawm - Fasting during Ramadan\n5. Hajj - Pilgrimage to Mecca\n\nThese form the foundation of Muslim life.`
-  }
-
-  if (input.includes('prophet') || input.includes('muhammad')) {
-    return `☪️ Prophet Muhammad (PBUH):\n\n- Born in Mecca around 570 CE\n- Received first revelation at age 40\n- The final prophet in Islam\n- Known as "Al-Amin" (The Trustworthy)\n- His life is an example for Muslims\n\nThe Quran was revealed to him over 23 years.`
-  }
-
-  if (input.includes('prayer') || input.includes('salah')) {
-    return `🤲 Salah (Prayer):\n\nMuslims pray 5 times daily:\n- Fajr (Dawn)\n- Dhuhr (Noon)\n- Asr (Afternoon)\n- Maghrib (Sunset)\n- Isha (Night)\n\nPrayer includes standing, bowing, and prostration while reciting verses from the Quran.`
-  }
-
-  if (input.includes('ramadan') || input.includes('fasting')) {
-    return `🌙 Ramadan:\n\nThe 9th month of Islamic calendar\n- Muslims fast from dawn to sunset\n- No food, drink, or smoking\n- Focus on prayer and reflection\n- Ends with Eid al-Fitr celebration\n\nFasting teaches self-discipline and empathy.`
-  }
-
-  if (input.includes('hello') || input.includes('hi') || input.includes('salam')) {
-    return `السلام عليكم (As-salamu alaykum)\nPeace be upon you!\n\nWelcome to our virtual classroom. I'm here to teach you about the Quran and Islamic teachings. What would you like to learn about today?`
-  }
-
-  return `Thank you for your question about "${userInput}".\n\nI'm here to help you learn about the Quran and Islamic teachings. You can ask me about:\n\n- Surahs and verses\n- The Five Pillars of Islam\n- Prophet Muhammad (PBUH)\n- Prayer and worship\n- Islamic history and teachings\n\nWhat would you like to explore?`
-}
+// The previous rules-based generateAIResponse has been replaced by a backend call via /api/chat.
 
 export default App

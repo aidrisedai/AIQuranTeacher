@@ -87,7 +87,7 @@ function App() {
     }
   ])
   const [boardActions, setBoardActions] = useState<BoardAction[]>([])
-  const [followCommands] = useState<boolean>(true)
+  const [isLoading, setIsLoading] = useState<boolean>(false)
 
   const handleSendMessage = (content: string) => {
     const userMessage: Message = {
@@ -98,6 +98,7 @@ function App() {
     }
 
     setMessages(prev => [...prev, userMessage])
+    setIsLoading(true)
 
     // Call backend APIs in parallel: chat reply and board plan
     const chatPromise = fetch('/api/chat', {
@@ -138,50 +139,62 @@ function App() {
         }
         setMessages(prev => [...prev, assistantMessage])
       } else {
+        const errorMsg = chatRes.reason?.message || String(chatRes.reason)
         const assistantMessage: Message = {
           id: (Date.now() + 2).toString(),
           role: 'assistant',
-          content: `Sorry, I couldn't get a response right now. (${chatRes.reason?.message || chatRes.reason})`,
+          content: errorMsg.includes('OPENAI_API_KEY')
+            ? '⚠️ OpenAI API key is not configured. Please set OPENAI_API_KEY in your .env file.'
+            : `Sorry, I couldn't get a response right now. (${errorMsg})`,
           timestamp: new Date()
         }
         setMessages(prev => [...prev, assistantMessage])
       }
 
       let planned: BoardAction[] = []
-      if (planRes.status === 'fulfilled') planned = planRes.value.actions || []
-
-      if (followCommands) {
-        // If planner returned nothing, try local fallback parser
-        if (!planned || planned.length === 0) {
-          planned = parseLocalActions(content)
-        }
-        if (planned && planned.length > 0) {
-          // Resolve any freehand_request actions via /api/draw
-          const freehandReqs = planned.filter(a => a.type === 'freehand_request') as Extract<BoardAction, { type: 'freehand_request' }>[]
-          const others = planned.filter(a => a.type !== 'freehand_request')
-
-          const strokeResults = await Promise.allSettled(
-            freehandReqs.map(req =>
-              fetch('/api/draw', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ instruction: req.instruction, color: req.color, width: req.width, style: req.style || 'chalk' })
-              }).then(async (res) => {
-                if (!res.ok) {
-                  const t = await res.text().catch(() => '')
-                  throw new Error(t || `HTTP ${res.status}`)
-                }
-                return res.json() as Promise<{ strokes: import('./App').Stroke[] }>
-              })
-            )
-          )
-
-          const strokeActions: BoardAction[] = strokeResults.flatMap(r => r.status === 'fulfilled' ? [{ type: 'freehand_strokes', strokes: r.value.strokes }] as BoardAction[] : [])
-
-          const finalActions = [...others, ...strokeActions]
-          if (finalActions.length) setBoardActions(prev => [...prev, ...finalActions])
-        }
+      if (planRes.status === 'fulfilled') {
+        planned = planRes.value.actions || []
+      } else {
+        console.warn('Plan API failed:', planRes.reason)
       }
+
+      // Always process drawing commands even if chat fails
+      // If planner returned nothing, try local fallback parser
+      if (!planned || planned.length === 0) {
+        planned = parseLocalActions(content)
+      }
+
+      if (planned && planned.length > 0) {
+        // Resolve any freehand_request actions via /api/draw
+        const freehandReqs = planned.filter(a => a.type === 'freehand_request') as Extract<BoardAction, { type: 'freehand_request' }>[]
+        const others = planned.filter(a => a.type !== 'freehand_request')
+
+        const strokeResults = await Promise.allSettled(
+          freehandReqs.map(req =>
+            fetch('/api/draw', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ instruction: req.instruction, color: req.color, width: req.width, style: req.style || 'chalk' })
+            }).then(async (res) => {
+              if (!res.ok) {
+                const t = await res.text().catch(() => '')
+                throw new Error(t || `HTTP ${res.status}`)
+              }
+              return res.json() as Promise<{ strokes: import('./App').Stroke[] }>
+            })
+          )
+        )
+
+        const strokeActions: BoardAction[] = strokeResults.flatMap(r => r.status === 'fulfilled' ? [{ type: 'freehand_strokes', strokes: r.value.strokes }] as BoardAction[] : [])
+
+        const finalActions = [...others, ...strokeActions]
+        if (finalActions.length) setBoardActions(prev => [...prev, ...finalActions])
+      }
+
+      setIsLoading(false)
+    }).catch((err) => {
+      console.error('Unexpected error:', err)
+      setIsLoading(false)
     })
   }
 
@@ -201,7 +214,7 @@ function App() {
         </div>
 
         <div className="chat-section">
-          <ChatInterface messages={messages} onSendMessage={handleSendMessage} />
+          <ChatInterface messages={messages} onSendMessage={handleSendMessage} isLoading={isLoading} />
         </div>
       </div>
     </div>

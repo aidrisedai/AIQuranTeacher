@@ -5,9 +5,10 @@ import { Message } from '../App'
 interface ChatInterfaceProps {
   messages: Message[]
   onSendMessage: (content: string) => void
+  isLoading?: boolean
 }
 
-function ChatInterface({ messages, onSendMessage }: ChatInterfaceProps) {
+function ChatInterface({ messages, onSendMessage, isLoading }: ChatInterfaceProps) {
   const [inputValue, setInputValue] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
@@ -53,6 +54,16 @@ function ChatInterface({ messages, onSendMessage }: ChatInterfaceProps) {
             </div>
           </div>
         ))}
+        {isLoading && (
+          <div className="message message-assistant">
+            <div className="message-avatar">👨‍🏫</div>
+            <div className="message-bubble">
+              <div className="message-content typing-indicator">
+                <span></span><span></span><span></span>
+              </div>
+            </div>
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
 
@@ -63,9 +74,10 @@ function ChatInterface({ messages, onSendMessage }: ChatInterfaceProps) {
           onChange={(e) => setInputValue(e.target.value)}
           placeholder="Ask a question about the Quran..."
           className="chat-input"
+          disabled={isLoading}
         />
-        <button type="submit" className="chat-send-button">
-          Send 📤
+        <button type="submit" className="chat-send-button" disabled={isLoading || !inputValue.trim()}>
+          {isLoading ? 'Processing...' : 'Send 📤'}
         </button>
       </form>
     </div>

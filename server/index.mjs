@@ -5,11 +5,24 @@ import OpenAI from 'openai'
 const app = express()
 const port = process.env.PORT ? Number(process.env.PORT) : 8787
 
+// Check API key at startup
+const API_KEY = process.env.OPENAI_API_KEY
+if (!API_KEY) {
+  console.warn('⚠️  WARNING: OPENAI_API_KEY not found in environment!')
+  console.warn('⚠️  Please create a .env file with: OPENAI_API_KEY=your_key_here')
+  console.warn('⚠️  The server will start but API calls will fail until the key is configured.')
+} else {
+  console.log('✓ OpenAI API key configured')
+}
+
 app.use(express.json())
 
 // Basic health check
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true })
+  res.json({
+    ok: true,
+    apiKeyConfigured: !!API_KEY
+  })
 })
 
 app.post('/api/chat', async (req, res) => {
@@ -24,12 +37,11 @@ app.post('/api/chat', async (req, res) => {
       return res.json({ reply: 'Drawing on the board.' })
     }
 
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) {
+    if (!API_KEY) {
       return res.status(500).json({ error: 'Server missing OPENAI_API_KEY' })
     }
 
-    const client = new OpenAI({ apiKey })
+    const client = new OpenAI({ apiKey: API_KEY })
 
     const completion = await client.chat.completions.create({
       model: 'gpt-4o-mini',
@@ -57,12 +69,11 @@ app.post('/api/plan', async (req, res) => {
       return res.status(400).json({ error: 'Invalid message' })
     }
 
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) {
+    if (!API_KEY) {
       return res.status(500).json({ error: 'Server missing OPENAI_API_KEY' })
     }
 
-    const client = new OpenAI({ apiKey })
+    const client = new OpenAI({ apiKey: API_KEY })
 
     const sys = `You translate teacher instructions into drawing actions for a classroom blackboard.
 Respond ONLY with strict JSON of the form { "actions": Action[] } where Action is one of:
@@ -109,10 +120,11 @@ app.post('/api/draw', async (req, res) => {
     if (!instruction || typeof instruction !== 'string') {
       return res.status(400).json({ error: 'Invalid instruction' })
     }
-    const apiKey = process.env.OPENAI_API_KEY
-    if (!apiKey) return res.status(500).json({ error: 'Server missing OPENAI_API_KEY' })
+    if (!API_KEY) {
+      return res.status(500).json({ error: 'Server missing OPENAI_API_KEY' })
+    }
 
-    const client = new OpenAI({ apiKey })
+    const client = new OpenAI({ apiKey: API_KEY })
     const sys = `You output simple hand-drawn sketches as JSON strokes.
 Return ONLY JSON: { "strokes": Stroke[] }
 Where Stroke = { "points": {"x": number, "y": number}[], "color"?: string, "width"?: number }.

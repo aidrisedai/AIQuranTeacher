@@ -10,10 +10,15 @@ interface Props {
 }
 
 // Map our BoardAction to Excalidraw element objects
-function toElements(action: BoardAction) {
+function toElements(action: BoardAction, dims?: { width: number; height: number; padX: number; padY: number }) {
   const now = Date.now()
   // Helper to construct element base
   const base = (partial: any) => ({ id: `el-${now}-${Math.random().toString(36).slice(2)}`, angle: 0, locked: false, ...partial })
+
+  // Default dimensions (fallback)
+  const { width = 800, height = 500, padX = 40, padY = 40 } = dims || {}
+  const boxW = width - padX * 2
+  const boxH = height - padY * 2
 
   switch (action.type) {
     case 'write_text': {
@@ -68,7 +73,6 @@ function toElements(action: BoardAction) {
       return []
     }
     case 'freehand_strokes': {
-      const padX = 40, padY = 40, boxW = 720, boxH = 420
       const mk = (s: Stroke) => base({
         type: 'freedraw',
         x: padX,
@@ -91,8 +95,20 @@ export default function BlackboardExcalidraw({ actions, onClear }: Props) {
   const overlayRef = useRef<HTMLCanvasElement | null>(null)
   const containerRef = useRef<HTMLDivElement | null>(null)
 
+  // Get dynamic canvas dimensions
+  const getCanvasDimensions = useCallback(() => {
+    const wrap = containerRef.current
+    if (!wrap) return { width: 800, height: 500, padX: 40, padY: 40 }
+    const w = wrap.clientWidth || 800
+    const h = wrap.clientHeight || 500
+    return { width: w, height: h, padX: 40, padY: 40 }
+  }, [])
+
   // Derived elements for the incoming actions (for Excalidraw-native shapes)
-  const incoming = useMemo(() => (actions ?? []).flatMap(toElements), [actions])
+  const incoming = useMemo(() => {
+    const dims = getCanvasDimensions()
+    return (actions ?? []).flatMap(action => toElements(action, dims))
+  }, [actions, getCanvasDimensions])
 
   // Add elements to Excalidraw when present
   useEffect(() => {

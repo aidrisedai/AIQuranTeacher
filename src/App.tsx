@@ -77,6 +77,80 @@ function parseLocalActions(message: string): BoardAction[] {
   return []
 }
 
+// Option A: compact string commands mapped directly to a single board action
+function parseSimpleCommandA(message: string): BoardAction | null {
+  const s = message.trim()
+  // Helper to get param value e.g., color=red -> 'red'
+  const get = (k: string): string | undefined => {
+    const m = s.match(new RegExp(`${k}=("[^"]+"|[^\s]+)`, 'i'))
+    if (!m) return undefined
+    return m[1]?.replace(/^"|"$/g, '')
+  }
+  const num = (k: string): number | undefined => {
+    const v = get(k)
+    if (v == null) return undefined
+    const n = Number(v)
+    return Number.isFinite(n) ? n : undefined
+  }
+
+  // write "text" ...
+  if (/^write\b/i.test(s)) {
+    const q = s.match(/"([\s\S]+?)"/)
+    const text = q?.[1] || s.replace(/^write\s*/i, '')
+    const color = get('color')
+    const size = num('size')
+    const x = num('x')
+    const y = num('y')
+    const rtl = /[\u0600-\u06FF]/.test(text)
+    return { type: 'write_text', text, rtl, size, color, x, y }
+  }
+
+  // arrow
+  if (/^arrow\b/i.test(s)) {
+    const x1 = num('x1') ?? 100
+    const y1 = num('y1') ?? 100
+    const x2 = num('x2') ?? 260
+    const y2 = num('y2') ?? 100
+    const color = get('color')
+    const width = num('width')
+    return { type: 'draw_shape', shape: 'arrow', points: [{ x: x1, y: y1 }, { x: x2, y: y2 }], color, width }
+  }
+
+  // line
+  if (/^line\b/i.test(s)) {
+    const x1 = num('x1') ?? 100
+    const y1 = num('y1') ?? 100
+    const x2 = num('x2') ?? 260
+    const y2 = num('y2') ?? 100
+    const color = get('color')
+    const width = num('width')
+    return { type: 'draw_shape', shape: 'line', points: [{ x: x1, y: y1 }, { x: x2, y: y2 }], color, width }
+  }
+
+  // circle
+  if (/^circle\b/i.test(s)) {
+    const cx = num('cx') ?? 240
+    const cy = num('cy') ?? 180
+    const r = num('r') ?? 60
+    const color = get('color')
+    const width = num('width')
+    return { type: 'draw_shape', shape: 'circle', points: [{ x: cx, y: cy }, { x: r, y: r }], color, width }
+  }
+
+  // rect
+  if (/^(rect|rectangle)\b/i.test(s)) {
+    const x = num('x') ?? 100
+    const y = num('y') ?? 120
+    const w = num('w') ?? 200
+    const h = num('h') ?? 120
+    const color = get('color')
+    const width = num('width')
+    return { type: 'draw_shape', shape: 'rect', points: [{ x, y }, { x: w, y: h }], color, width }
+  }
+
+  return null
+}
+
 function App() {
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -98,6 +172,20 @@ function App() {
     }
 
     setMessages(prev => [...prev, userMessage])
+
+    // Fast path: simple command Option A -> draw immediately (no network)
+    const direct = parseSimpleCommandA(content)
+    if (direct) {
+      setBoardActions(prev => [...prev, direct])
+      const assistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        role: 'assistant',
+        content: 'Drawing on the board.',
+        timestamp: new Date(),
+      }
+      setMessages(prev => [...prev, assistantMessage])
+      return
+    }
 
     // Call backend APIs in parallel: chat reply and board plan
     const chatPromise = fetch('/api/chat', {

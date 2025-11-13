@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import ChatInterface from './components/ChatInterface'
-import BlackboardExcalidraw from './components/BlackboardExcalidraw'
+import TldrawBoard from './components/TldrawBoard'
+import { parseDSLToActions } from './diagram/grammar'
 import './App.css'
 
 export interface Message {
@@ -25,11 +26,11 @@ function parseLocalActions(message: string): BoardAction[] {
   const lower = m.toLowerCase()
 
   const pickColor = (): string | undefined => {
-    if (lower.includes(' red')) return '#ef4444'
-    if (lower.includes(' yellow')) return '#fde047'
-    if (lower.includes(' green')) return '#22c55e'
-    if (lower.includes(' blue')) return '#60a5fa'
-    if (lower.includes(' white')) return '#fafafa'
+    if (lower.includes(' red')) return 'red'
+    if (lower.includes(' yellow')) return 'yellow'
+    if (lower.includes(' green')) return 'green'
+    if (lower.includes(' blue')) return 'blue'
+    if (lower.includes(' white')) return 'white'
     return undefined
   }
   const color = pickColor()
@@ -80,12 +81,14 @@ function parseLocalActions(message: string): BoardAction[] {
 // Option A: compact string commands mapped directly to a single board action
 function parseSimpleCommandA(message: string): BoardAction | null {
   const s = message.trim()
-  // Helper to get param value e.g., color=red -> 'red'
-  const get = (k: string): string | undefined => {
-    const m = s.match(new RegExp(`${k}=("[^"]+"|[^\s]+)`, 'i'))
-    if (!m) return undefined
-    return m[1]?.replace(/^"|"$/g, '')
+  // Parse simple key=value params (handles quoted values)
+  const params = new Map<string, string>()
+  for (const m of s.matchAll(/(\w+)=((?:\"[^\"]+\")|\S+)/g)) {
+    const key = m[1].toLowerCase()
+    const val = m[2].replace(/^\"|\"$/g, '')
+    params.set(key, val)
   }
+  const get = (k: string): string | undefined => params.get(k.toLowerCase())
   const num = (k: string): number | undefined => {
     const v = get(k)
     if (v == null) return undefined
@@ -163,6 +166,37 @@ function App() {
   const [boardActions, setBoardActions] = useState<BoardAction[]>([])
   const [followCommands] = useState<boolean>(true)
 
+  const runBoardTest = () => {
+    // Sample DSL to validate parser + renderer
+    const sample = [
+      'write "بِسْمِ اللَّهِ" at (80,80) size=32 color=white',
+      'flow Start -> Wudu -> Prayer at (120,160) spacing=220 w=220 h=120 color=yellow',
+      'arrow (230,220) -> (350,220) color=red width=4',
+      'circle at (280,300) r=70 color=green width=4',
+    ].join('\n')
+    const actions = parseDSLToActions(sample)
+    if (actions.length) {
+      setBoardActions(prev => [...prev, ...actions])
+    }
+    // Also test freehand draw (cat) via drawing agent with fallback
+    fetch('/api/draw', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ instruction: 'a cat on the board', style: 'chalk' })
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const t = await res.text().catch(() => '')
+          throw new Error(t || `HTTP ${res.status}`)
+        }
+        return res.json() as Promise<{ strokes: Stroke[] }>
+      })
+      .then(({ strokes }) => {
+        setBoardActions(prev => [...prev, { type: 'freehand_strokes', strokes }])
+      })
+      .catch(() => { /* ignore test draw failure */ })
+  }
+
   const handleSendMessage = (content: string) => {
     const userMessage: Message = {
       id: Date.now().toString(),
@@ -172,6 +206,22 @@ function App() {
     }
 
     setMessages(prev => [...prev, userMessage])
+
+    // DSL path: diagram / flow / box ...
+    if (/^(diagram:|flow:|flow\b|box\b|rectangle\b|rect\b|script:)/i.test(content.trim())) {
+      const actions = parseDSLToActions(content)
+      if (actions.length) {
+        setBoardActions(prev => [...prev, ...actions])
+        const assistantMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: 'Drawing on the board.',
+          timestamp: new Date(),
+        }
+        setMessages(prev => [...prev, assistantMessage])
+        return
+      }
+    }
 
     // Fast path: simple command Option A -> draw immediately (no network)
     const direct = parseSimpleCommandA(content)
@@ -189,37 +239,46 @@ function App() {
 
     // If the user said "draw ..." and it isn't a simple Option A command, use the drawing agent directly
     if (/^draw\b/i.test(content)) {
-      fetch('/api/draw', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instruction: content.replace(/^draw\s*/i, ''), style: 'chalk' })
+      const ask = async (instruction: string, attempts = 2): Promise<Stroke[]> => {
+        for (let i = 0; i < attempts; i++) {
+          try {
+            const res = await fetch('/api/draw', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ instruction, style: 'chalk' })
+            })
+            if (!res.ok) {
+              const t = await res.text().catch(() => '')
+              throw new Error(t || `HTTP ${res.status}`)
+            }
+            const data = (await res.json()) as { strokes: Stroke[] }
+            return data.strokes
+          } catch (e) {
+            if (i === attempts - 1) throw e
+            await new Promise(r => setTimeout(r, 400))
+          }
+        }
+        return []
+      }
+
+      ask(content.replace(/^draw\s*/i, '')).then((strokes) => {
+        setBoardActions(prev => [...prev, { type: 'freehand_strokes', strokes }])
+        const assistantMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: 'Drawing on the board.',
+          timestamp: new Date()
+        }
+        setMessages(prev => [...prev, assistantMessage])
+      }).catch((err) => {
+        const assistantMessage: Message = {
+          id: (Date.now() + 2).toString(),
+          role: 'assistant',
+          content: `Sorry, I couldn't draw that. (${err.message})`,
+          timestamp: new Date()
+        }
+        setMessages(prev => [...prev, assistantMessage])
       })
-        .then(async (res) => {
-          if (!res.ok) {
-            const t = await res.text().catch(() => '')
-            throw new Error(t || `HTTP ${res.status}`)
-          }
-          return res.json() as Promise<{ strokes: Stroke[] }>
-        })
-        .then(({ strokes }) => {
-          setBoardActions(prev => [...prev, { type: 'freehand_strokes', strokes }])
-          const assistantMessage: Message = {
-            id: (Date.now() + 1).toString(),
-            role: 'assistant',
-            content: 'Drawing on the board.',
-            timestamp: new Date()
-          }
-          setMessages(prev => [...prev, assistantMessage])
-        })
-        .catch((err) => {
-          const assistantMessage: Message = {
-            id: (Date.now() + 2).toString(),
-            role: 'assistant',
-            content: `Sorry, I couldn't draw that. (${err.message})`,
-            timestamp: new Date()
-          }
-          setMessages(prev => [...prev, assistantMessage])
-        })
       return
     }
 
@@ -285,19 +344,26 @@ function App() {
           const others = planned.filter(a => a.type !== 'freehand_request')
 
           const strokeResults = await Promise.allSettled(
-            freehandReqs.map(req =>
-              fetch('/api/draw', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ instruction: req.instruction, color: req.color, width: req.width, style: req.style || 'chalk' })
-              }).then(async (res) => {
-                if (!res.ok) {
-                  const t = await res.text().catch(() => '')
-                  throw new Error(t || `HTTP ${res.status}`)
+            freehandReqs.map(async (req) => {
+              for (let i = 0; i < 2; i++) {
+                try {
+                  const res = await fetch('/api/draw', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ instruction: req.instruction, color: req.color, width: req.width, style: req.style || 'chalk' })
+                  })
+                  if (!res.ok) {
+                    const t = await res.text().catch(() => '')
+                    throw new Error(t || `HTTP ${res.status}`)
+                  }
+                  return (await res.json()) as { strokes: import('./App').Stroke[] }
+                } catch (e) {
+                  if (i === 1) throw e
+                  await new Promise(r => setTimeout(r, 400))
                 }
-                return res.json() as Promise<{ strokes: import('./App').Stroke[] }>
-              })
-            )
+              }
+              return { strokes: [] } as { strokes: import('./App').Stroke[] }
+            })
           )
 
           const strokeActions: BoardAction[] = strokeResults.flatMap(r => r.status === 'fulfilled' ? [{ type: 'freehand_strokes', strokes: r.value.strokes }] as BoardAction[] : [])
@@ -315,13 +381,14 @@ function App() {
 
   return (
     <div className="classroom">
-      <header className="classroom-header">
+      <header className="classroom-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <h1>🕌 AI Quran Teacher - Virtual Classroom</h1>
+        <button onClick={runBoardTest} style={{ padding: '6px 10px' }}>Run Test</button>
       </header>
 
       <div className="classroom-content">
         <div className="blackboard-section">
-          <BlackboardExcalidraw onClear={handleClearBlackboard} actions={boardActions} />
+          <TldrawBoard onClear={handleClearBlackboard} actions={boardActions} />
         </div>
 
         <div className="chat-section">
